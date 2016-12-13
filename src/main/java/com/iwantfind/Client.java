@@ -2,9 +2,7 @@ package com.iwantfind;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import com.sun.javafx.scene.shape.PathUtils;
 import org.apache.commons.cli.*;
-import org.apache.hadoop.hdfs.util.EnumCounters;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationResponse;
 import org.apache.hadoop.yarn.api.records.*;
@@ -195,8 +193,8 @@ public class Client {
 
         // Setup local resources
         Map<String, LocalResource> localResources = new HashMap<String, LocalResource>();
-        localResources.put("file.tar.gz",
-                YarnUtils.createLocalResourceOfFile(mYarnConf, mResourcePath + "/file.tar.gz"));
+        localResources.put(YarnUtils.SETUP_SCRIPT,
+                YarnUtils.createLocalResourceOfFile(mYarnConf, mResourcePath + "/" + YarnUtils.SETUP_SCRIPT));
         mAmContainer.setLocalResources(localResources);
 
         // Setup CLASSPATH for ApplicationMaster

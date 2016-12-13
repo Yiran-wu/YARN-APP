@@ -52,6 +52,10 @@ public class YarnUtils {
         }
     }
 
+    public static String buildCommand(YarnContainerType containerType) {
+        return buildCommand(containerType, new HashMap<String, String>());
+    }
+
     public static String buildCommand(YarnContainerType containerType, Map<String, String> args) {
         CommandBuilder commandBuilder =
                 new CommandBuilder("./" + SETUP_SCRIPT).addArg(containerType.getName());
