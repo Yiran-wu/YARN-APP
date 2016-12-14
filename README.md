@@ -17,7 +17,7 @@ bin/submit.sh 2 hdfs://clustername/tmp
 #程序执行结果查看
 yarn logs -application appid
 
-因为没有实现Web界面，所以只能通过日志查看
+因为没有实现Web界面，所以只能通过日志查看（执行前，先将App kill）
 
 
 
