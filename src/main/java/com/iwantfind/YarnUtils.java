@@ -19,7 +19,7 @@ import java.util.Map;
  */
 public class YarnUtils {
 
-    public static final String SETUP_SCRIPT = "run-setup.sh";
+    public static final String SETUP_SCRIPT = "run.sh";
 
     public static LocalResource createLocalResourceOfFile(YarnConfiguration yarnConf,
                                                           String resource) throws IOException {

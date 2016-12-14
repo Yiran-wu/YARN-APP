@@ -3,17 +3,27 @@ package com.iwantfind;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.cli.*;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationResponse;
 import org.apache.hadoop.yarn.api.records.*;
+import org.apache.hadoop.yarn.client.ClientRMProxy;
 import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.client.api.YarnClientApplication;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.Apps;
+import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -23,7 +33,7 @@ import java.util.Map;
  * Created by YiRan on 12/13/16.
  */
 public class Client {
-
+    private static final Log LOG = LogFactory.getLog(Client.class);
     /** Yarn client 与ResourceManager会话. */
     private YarnClient mYarnClient;
     /** Yarn configuration. */
@@ -115,6 +125,7 @@ public class Client {
         mAmMemoryInMB = Integer.parseInt(cliParser.getOptionValue("am_memory", "256"));
         mAmVCores = Integer.parseInt(cliParser.getOptionValue("am_vcores", "1"));
         mNumWorkers = Integer.parseInt(cliParser.getOptionValue("num_workers", "1"));
+        mResourcePath = cliParser.getOptionValue("resource_path");
 
         Preconditions.checkArgument(mAmMemoryInMB > 0,
                 "Invalid memory specified for application master, " + "exiting. Specified memory="
@@ -183,8 +194,8 @@ public class Client {
      */
     private void setupContainerLaunchContext() throws IOException, YarnException {
         Map<String, String> applicationMasterArgs = ImmutableMap.<String, String>of(
-                "-num_workers", Integer.toString(mNumWorkers));
-
+                "-num_workers", Integer.toString(mNumWorkers),
+                 "-resource_path", mResourcePath);
         final String amCommand =
                 YarnUtils.buildCommand(YarnUtils.YarnContainerType.APPLICATION_MASTER, applicationMasterArgs);
 
@@ -193,14 +204,46 @@ public class Client {
 
         // Setup local resources
         Map<String, LocalResource> localResources = new HashMap<String, LocalResource>();
-        localResources.put(YarnUtils.SETUP_SCRIPT,
+        localResources.put(YarnUtils.SETUP_SCRIPT, // TODO 后期考虑将mResourcePath 设置成一个临时目录，目前没有使用
                 YarnUtils.createLocalResourceOfFile(mYarnConf, mResourcePath + "/" + YarnUtils.SETUP_SCRIPT));
+        localResources.put("iwantfind-1.0-SNAPSHOT.jar",
+                YarnUtils.createLocalResourceOfFile(mYarnConf, mResourcePath + "/iwantfind-1.0-SNAPSHOT.jar"));
+        localResources.put("log4j.properties",
+                YarnUtils.createLocalResourceOfFile(mYarnConf, mResourcePath + "/log4j.properties"));
         mAmContainer.setLocalResources(localResources);
 
         // Setup CLASSPATH for ApplicationMaster
         Map<String, String> appMasterEnv = new HashMap<String, String>();
         setupAppMasterEnv(appMasterEnv);
         mAmContainer.setEnvironment(appMasterEnv);
+
+        if (UserGroupInformation.isSecurityEnabled()) {
+            Credentials credentials = new Credentials();
+            String tokenRenewer = mYarnConf.get(YarnConfiguration.RM_PRINCIPAL);
+            if (tokenRenewer == null || tokenRenewer.length() == 0) {
+                throw new IOException("Can't get Master Kerberos principal for the RM to use as renewer");
+            }
+            org.apache.hadoop.fs.FileSystem fs = org.apache.hadoop.fs.FileSystem.get(mYarnConf);
+            // getting tokens for the default file-system.
+            final Token<?>[] tokens = fs.addDelegationTokens(tokenRenewer, credentials);
+            if (tokens != null) {
+                for (Token<?> token : tokens) {
+                    LOG.info("Got dt for " + fs.getUri() + "; " + token);
+                }
+            }
+            // getting yarn resource manager token
+            org.apache.hadoop.conf.Configuration config = mYarnClient.getConfig();
+            Token<TokenIdentifier> token = ConverterUtils.convertFromYarn(
+                    mYarnClient.getRMDelegationToken(new org.apache.hadoop.io.Text(tokenRenewer)),
+                    ClientRMProxy.getRMDelegationTokenService(config));
+            LOG.info("Added RM delegation token: " + token);
+            credentials.addToken(token.getService(), token);
+
+            DataOutputBuffer dob = new DataOutputBuffer();
+            credentials.writeTokenStorageToStream(dob);
+            ByteBuffer buffer = ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
+            mAmContainer.setTokens(buffer);
+        }
     }
 
     /**
@@ -215,10 +258,10 @@ public class Client {
             Apps.addToEnvironment(appMasterEnv, classpath, path.trim(),
                     ApplicationConstants.CLASS_PATH_SEPARATOR);
         }
-        Apps.addToEnvironment(appMasterEnv, classpath, ApplicationConstants.Environment.PWD.$(),
+        Apps.addToEnvironment(appMasterEnv, classpath, ApplicationConstants.Environment.PWD.$() + "/*",
                 ApplicationConstants.CLASS_PATH_SEPARATOR);
 
-        appMasterEnv.put("YARN_APP_DEMO_HOME", ApplicationConstants.Environment.PWD.$());
+        appMasterEnv.put(Constant.APP_HOME, ApplicationConstants.Environment.PWD.$());
 
     }
 

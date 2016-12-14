@@ -8,6 +8,10 @@ import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.client.api.NMClient;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -15,6 +19,10 @@ import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.client.api.AMRMClient.ContainerRequest;
 import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.yarn.util.Records;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,53 +30,38 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
+import java.security.PrivilegedExceptionAction;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
 
 /**
  * Created by YiRan on 12/13/16.
  */
-public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
+public class ApplicationMaster  extends AbstractService implements AMRMClientAsync.CallbackHandler {
     private static final Logger LOG = LoggerFactory.getLogger(ApplicationMaster.class);
 
-
-    /* Parameters sent from Client. */
-    private final int mWorkerCpu;
-    private final int mWorkerMemInMB;
-    private final int mNumWorkers;
-
+    private final int mWorkerCpu;      //Worker的VCORE
+    private final int mWorkerMemInMB;  //Worker的内存资源
+    private final int mNumWorkers;     //启动几个worker?
 
     private final String mResourcePath;
-    private final int mMaxWorkersPerHost = 1;
+    private final int mMaxWorkersPerHost = 1;  //每个节点一个worker
 
     private static final NodeState[] USABLE_NODE_STATES;
 
     private final YarnConfiguration mYarnConf = new YarnConfiguration();
 
-    private final Multiset<String> mWorkerHosts;
-    /**
-     * The count starts at 1, then becomes 0 when the application is done.
-     */
-    private final CountDownLatch mApplicationDoneLatch;
+    private final Multiset<String> mWorkerHosts;          // 记录已经启动worker的节点
+    private final CountDownLatch mApplicationDoneLatch;   // 启动计数器， 初始化为1， 0时表示App结束
 
-    /**
-     * Client to talk to Resource Manager.
-     */
-    private final AMRMClientAsync<ContainerRequest> mRMClient;
-    /**
-     * Client to talk to Node Manager.
-     */
-    private final NMClient mNMClient;
-    /**
-     * Client Resource Manager Service.
-     */
-    private final YarnClient mYarnClient;
-    /**
-     * Network address of the container allocated for Alluxio master.
-     */
+    private final AMRMClientAsync<ContainerRequest> mRMClient;  //与ResourceManagerService通讯的客户端，负责资源请求
+    private final NMClient mNMClient;   // 与NN通讯的客户端
+    private final YarnClient mYarnClient;   // 与ResourceManager通讯的客户端，负责RM状态信息获取
     private String mMasterContainerNetAddress;
-    private CountDownLatch mOutstandingWorkerContainerRequestsLatch = null;
-
+    private CountDownLatch mOutstandingWorkerContainerRequestsLatch = null;  //统计Worker是否都完成了
+    /** Security tokens for HDFS. */
+    private ByteBuffer mAllTokens;
 
     static {
         List<NodeState> usableStates = Lists.newArrayList();
@@ -89,7 +82,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
         AMRMClientAsync<ContainerRequest> createAMRMClientAsync(int heartbeatMs,
                                                                 AMRMClientAsync.CallbackHandler handler);
     }
-    //private volatile ContainerAllocator mContainerAllocator;
+
 
     public void onContainersCompleted(List<ContainerStatus> statuses) {
         for (ContainerStatus status : statuses) {
@@ -131,9 +124,32 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
     public static void main(String[] args) throws Exception {
         Options options = new Options();
         options.addOption("num_workers", true, "Number of Alluxio workers to launch. Default 1");
-        LOG.info("Starting Application Master with args {}", Arrays.toString(args));
-        final CommandLine cliParser = new GnuParser().parse(options, args);
-        runApplicationMaster(cliParser);
+        options.addOption("resource_path", true,
+                "(Required) HDFS path containing the Application Master");
+        try {
+            final CommandLine cliParser = new GnuParser().parse(options, args);
+            if (UserGroupInformation.isSecurityEnabled()) {
+                String user = System.getenv("USER");
+                UserGroupInformation ugi = UserGroupInformation.createRemoteUser(user);
+                for (Token token : UserGroupInformation.getCurrentUser().getTokens()) {
+                    ugi.addToken(token);
+                }
+                LOG.info("UserGroupInformation: " + ugi);
+                ugi.doAs(new PrivilegedExceptionAction<Void>() {
+                    @Override
+                    public Void run() throws Exception {
+                        runApplicationMaster(cliParser);
+                        return null;
+                    }
+                });
+            } else {
+                runApplicationMaster(cliParser);
+            }
+        } catch (Exception e) {
+            LOG.error("Error running Application Master", e);
+            System.out.println("Error running Application Master" + e);
+            System.exit(1);
+        }
     }
 
     /**
@@ -142,10 +158,11 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
     private static void runApplicationMaster(final CommandLine cliParser) throws Exception {
         int numWorkers = Integer.parseInt(cliParser.getOptionValue("num_workers", "1"));
         String masterAddress = cliParser.getOptionValue("master_address");
-
+        String resourcePath = cliParser.getOptionValue("resource_path");
 
         ApplicationMaster applicationMaster =
-                new ApplicationMaster(numWorkers, masterAddress, "path");
+                new ApplicationMaster(numWorkers, masterAddress, resourcePath);
+        applicationMaster.init(new YarnConfiguration());
         applicationMaster.start();
         applicationMaster.requestContainers();
         applicationMaster.waitForShutdown();
@@ -166,6 +183,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
     public ApplicationMaster(int numWorkers, String masterAddress, String resourcePath,
                              YarnClient yarnClient, NMClient nMClient, AMRMClientAsyncFactory amrmFactory) {
 
+        super("YarnDemoAppMaster");
         mWorkerCpu = 1;
         // memory for running worker
         mWorkerMemInMB = 1024;
@@ -179,6 +197,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
 
         // Heartbeat to the resource manager every 500ms.
         mRMClient = AMRMClientAsync.createAMRMClientAsync(500, this);
+
     }
 
     /**
@@ -187,8 +206,22 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
      * @throws IOException   if registering the application master fails due to an IO error
      * @throws YarnException if registering the application master fails due to an internal Yarn error
      */
-    public void start() throws YarnException, IOException {
-
+    protected void serviceStart() throws YarnException, IOException {
+        if (UserGroupInformation.isSecurityEnabled()) {
+            Credentials credentials =
+                    UserGroupInformation.getCurrentUser().getCredentials();
+            DataOutputBuffer credentialsBuffer = new DataOutputBuffer();
+            credentials.writeTokenStorageToStream(credentialsBuffer);
+            // Now remove the AM -> RM token so that containers cannot access it.
+            Iterator<Token<?>> iter = credentials.getAllTokens().iterator();
+            while (iter.hasNext()) {
+                Token<?> token = iter.next();
+                if (token.getKind().equals(AMRMTokenIdentifier.KIND_NAME)) {
+                    iter.remove();
+                }
+            }
+            mAllTokens = ByteBuffer.wrap(credentialsBuffer.getData(), 0, credentialsBuffer.getLength());
+        }
         mNMClient.init(mYarnConf);
         mNMClient.start();
 
@@ -200,22 +233,19 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
 
         // Register with ResourceManager
         String hostname = InetAddress.getLocalHost().toString();
+        mMasterContainerNetAddress = hostname;
         mRMClient.registerApplicationMaster(hostname, 0 /* port */, "" /* tracking url */);
+        System.out.println("ApplicationMaster "+  hostname+"  registered," );
         LOG.info("ApplicationMaster {}  registered,", hostname);
     }
 
     public void requestContainers() throws Exception {
-
-
-        int round = 0;
-        while (mWorkerHosts.size() < mNumWorkers) {
+        while (mWorkerHosts.size() < mNumWorkers) {  // 一直请求，直到请求到足够的Worker
             requestWorkerContainers();
             LOG.info("Waiting for {} worker containers to be allocated",
                     mOutstandingWorkerContainerRequestsLatch.getCount());
-            // TODO(andrew): Handle the case where something goes wrong and some worker containers never
-            // get allocated. See ALLUXIO-1410
+
             mOutstandingWorkerContainerRequestsLatch.await();
-            round++;
         }
         if (mWorkerHosts.size() < mNumWorkers) {
             LOG.error(
@@ -233,12 +263,19 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
     }
 
     private void launchWorkerContainers(List<Container> containers) {
-        final String command = YarnUtils.buildCommand(YarnUtils.YarnContainerType.WORKER);
+
+        Map<String, String> args = new HashMap<String, String>();
+        args.put("ls", "/tmp");  // TODO 每个Worker的执行命令写死，后期考虑客户端传入
+        final String command = YarnUtils.buildCommand(YarnUtils.YarnContainerType.WORKER, args);
 
         ContainerLaunchContext ctx = Records.newRecord(ContainerLaunchContext.class);
         ctx.setCommands(Lists.newArrayList(command));
         ctx.setLocalResources(setupLocalResources(mResourcePath));
-//        ctx.setEnvironment(setupWorkerEnvironment(mMasterContainerNetAddress, mRamdiskMemInMB));
+        ctx.setEnvironment(setupWorkerEnvironment(mMasterContainerNetAddress));
+
+        if (UserGroupInformation.isSecurityEnabled()) {
+            ctx.setTokens(mAllTokens.duplicate());
+        }
         for (Container container : containers) {
             synchronized (mWorkerHosts) {
                 LOG.info("===========" + ctx.getCommands());
@@ -268,6 +305,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
      * Requests containers for the workers, attempting to get containers on separate nodes.
      */
     private void requestWorkerContainers() throws Exception {
+        System.out.println("Requesting worker containers");
         LOG.info("Requesting worker containers");
         // Resource requirements for worker containers
         Resource workerResource = Records.newRecord(Resource.class);
@@ -278,7 +316,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
 
         mOutstandingWorkerContainerRequestsLatch = new CountDownLatch(neededWorkers);
         String[] hosts;
-        boolean relaxLocality = false;
+        boolean relaxLocality = false; // 严格按照请求获取资源
         hosts = getUnfilledWorkerHosts();
         if (hosts.length < neededWorkers) {
             throw new RuntimeException(
@@ -295,6 +333,11 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
         }
     }
 
+    /**
+     * 获得没有填充满的节点列表
+     * @return
+     * @throws Exception
+     */
     private String[] getUnfilledWorkerHosts() throws Exception {
         List<String> unusedHosts = Lists.newArrayList();
         for (String host : getNodeHosts(mYarnClient)) {
@@ -313,7 +356,7 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
         return nodeHosts.build();
     }
 
-    public void stop() {
+    protected void serviceStop() {
         try {
             mRMClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED, "", "");
         } catch (YarnException e) {
@@ -325,16 +368,25 @@ public class ApplicationMaster implements AMRMClientAsync.CallbackHandler {
         mYarnClient.stop();
     }
 
-    private static Map<String, LocalResource> setupLocalResources(String resourcePath) {
-        Map<String, LocalResource> localResources = new HashMap<String, LocalResource>();
-
-        return localResources;
+    private static Map<String, LocalResource> setupLocalResources(String resourcePath)  {
+        try {
+            Map<String, LocalResource> localResources = new HashMap<String, LocalResource>();
+            localResources.put(YarnUtils.SETUP_SCRIPT,
+                    YarnUtils.createLocalResourceOfFile(new YarnConfiguration(), resourcePath + "/" + YarnUtils.SETUP_SCRIPT));
+            localResources.put("iwantfind-1.0-SNAPSHOT.jar",
+                    YarnUtils.createLocalResourceOfFile(new YarnConfiguration(), resourcePath + "/iwantfind-1.0-SNAPSHOT.jar"));
+            localResources.put("log4j.properties",
+                    YarnUtils.createLocalResourceOfFile(new YarnConfiguration(), resourcePath + "/log4j.properties"));
+            return localResources;
+        } catch (IOException e) {
+            throw new RuntimeException("Cannot find resource", e);
+        }
 
     }
 
-    private static Map<String, String> setupWorkerEnvironment(String masterContainerNetAddress,
-                                                              int ramdiskMemInMB) {
+    private static Map<String, String> setupWorkerEnvironment(String masterContainerNetAddress) {
         Map<String, String> env = new HashMap<String, String>();
+        env.put(Constant.APP_HOME, masterContainerNetAddress);
 
         return env;
     }
