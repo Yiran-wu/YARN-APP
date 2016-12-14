@@ -97,6 +97,10 @@ public class ApplicationMaster  extends AbstractService implements AMRMClientAsy
         }
     }
 
+    /**
+     * 获得资源后被调用
+     * @param containers
+     */
     public void onContainersAllocated(List<Container> containers) {
         int count = 0;
         for (Container container : containers) {
@@ -123,7 +127,7 @@ public class ApplicationMaster  extends AbstractService implements AMRMClientAsy
 
     public static void main(String[] args) throws Exception {
         Options options = new Options();
-        options.addOption("num_workers", true, "Number of Alluxio workers to launch. Default 1");
+        options.addOption("num_workers", true, "Number of workers to launch. Default 1");
         options.addOption("resource_path", true,
                 "(Required) HDFS path containing the Application Master");
         try {
@@ -327,7 +331,7 @@ public class ApplicationMaster  extends AbstractService implements AMRMClientAsy
             // TODO(andrew): Consider partitioning the available hosts among the worker requests
             ContainerRequest containerAsk = new ContainerRequest(workerResource, hosts,
                     null /* any racks */, Priority.newInstance(0), relaxLocality);
-            LOG.info("Making resource request for Alluxio worker {}: cpu {} memory {} MB on hosts {}", i,
+            LOG.info("Making resource request for worker {}: cpu {} memory {} MB on hosts {}", i,
                     workerResource.getVirtualCores(), workerResource.getMemory(), hosts);
             mRMClient.addContainerRequest(containerAsk);
         }

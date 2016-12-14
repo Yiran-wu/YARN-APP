@@ -3,11 +3,11 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")"; pwd)"
 
 function printUsage {
-  echo "Usage: submit.sh <numWorkers> <pathHdfs> [masterAddress]"
+  echo "Usage: submit.sh <numWorkers> <pathHdfs> "
   echo -e "  numWorkers        \tNumber of workers to launch"
-  echo -e "  pathHdfs          \tPath on HDFS to put alluxio jar and distribute it to YARN"
+  echo -e "  pathHdfs          \tPath on HDFS to put jar and distribute it to YARN"
   echo
-  echo "Example: ./submit.sh 10 hdfs://localhost:9000/tmp/ "
+  echo "Example: ./submit.sh 10 hdfs://cluster/tmp/ "
 }
 
 if [[ "$#" -ne 2 ]] ; then

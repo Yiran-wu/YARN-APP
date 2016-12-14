@@ -44,9 +44,6 @@ public class YarnUtils {
             mName = name;
         }
 
-        /**
-         * @return the name of the container type
-         */
         public String getName() {
             return mName;
         }

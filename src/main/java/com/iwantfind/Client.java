@@ -74,9 +74,8 @@ public class Client {
                 "Amount of memory in MB to request to run ApplicationMaster. Default 256");
         mOptions.addOption("am_vcores", true,
                 "Amount of virtual cores to request to run ApplicationMaster. Default 1");
-//        mOptions.addOption("master_address", true, "(Required) Address to run Alluxio master");
         mOptions.addOption("help", false, "Print usage");
-        mOptions.addOption("num_workers", true, "Number of Alluxio workers to launch. Default 1");
+        mOptions.addOption("num_workers", true, "Number of workers to launch. Default 1");
         mOptions.addOption("resource_path", true,
                 "(Required) HDFS path containing the Application Master");
     }
